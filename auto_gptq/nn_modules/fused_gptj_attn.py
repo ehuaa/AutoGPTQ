@@ -235,11 +235,12 @@ class FusedGPTJAttentionForQuantizedModel(FusedBaseAttentionModule):
         desc_act=False,
         trainable=False,
         bits: int = 4,
-        disable_exllama=False,
+        disable_exllama=True,
+        disable_exllamav2=False,
         **kwargs
     ):
         config = model.config
-        QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, desc_act=desc_act, group_size=group_size, bits=bits, disable_exllama=disable_exllama)
+        QuantLinear = dynamically_import_QuantLinear(use_triton=use_triton, desc_act=desc_act, group_size=group_size, bits=bits, disable_exllama=disable_exllama, disable_exllamav2=disable_exllamav2)
 
         for name, m in model.named_modules():
             if not isinstance(m, GPTJAttention):
@@ -276,6 +277,8 @@ class FusedGPTJAttentionForQuantizedModel(FusedBaseAttentionModule):
             qlinear_kwargs = {"trainable": trainable}
             if (not desc_act or group_size == -1) and not use_triton:
                 qlinear_kwargs["use_cuda_fp16"] = use_cuda_fp16
+            qlinear_kwargs["weight_dtype"] = q_proj.scales.dtype
+            
             qkv_proj = QuantLinear(*qlinear_args, **qlinear_kwargs)
             qkv_proj.qweight = qweights
             qkv_proj.qzeros = qzeros
