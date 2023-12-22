@@ -44,7 +44,8 @@ class QuantLinear(nn.Module):
         self.bits = bits
         self.group_size = group_size if group_size != -1 else infeatures
         self.maxq = 2 ** self.bits - 1
-
+        
+        # PyTorch中定义模型时，有时候会遇到self.register_buffer('name', Tensor)的操作，该方法的作用是定义一组参数，该组参数的特别之处在于：模型训练时不会更新（即调用 optimizer.step() 后该组参数不会变化，只可人为地改变它们的值），但是保存模型时，该组参数又作为模型参数不可或缺的一部分被保存。
         self.register_buffer(
             'qweight',
             torch.zeros((infeatures // 32 * self.bits, outfeatures), dtype=torch.int32)
@@ -193,7 +194,7 @@ class QuantLinear(nn.Module):
         qzeros = qzeros.astype(np.int32)
         self.qzeros = torch.from_numpy(qzeros)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor):     # TODO 使用3bit或者4bit推理 gptq实现了一些高效的kernel，推理的时候需要把g_idx也考虑在内
         out_shape = x.shape[:-1] + (self.outfeatures,)
         x = x.reshape(-1, x.shape[-1])
         if self.autogptq_cuda_available and (

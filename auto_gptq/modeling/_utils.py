@@ -71,7 +71,7 @@ def make_quant(
         name1 = name + '.' + attr if name != '' else attr
         if name1 in names:
             ori_layer_device = get_device(getattr(module, attr))
-            delattr(module, attr)
+            delattr(module, attr)   # delattr()仅删除属性,但不会影响已经持有该属性值的其他变量。直到这些变量也都被释放,原来的值才有可能被垃圾回收
             if isinstance(tmp,nn.Linear):
                 in_features = tmp.in_features
                 out_features = tmp.out_features
@@ -88,8 +88,10 @@ def make_quant(
             else:
                 new_layer = QuantLinear(bits, group_size, in_features, out_features, True, trainable=trainable)
             new_layer.device = ori_layer_device
-            setattr(module, attr, new_layer.to(ori_layer_device))
-    for name1, child in module.named_children():
+            setattr(module, attr, new_layer.to(ori_layer_device))       # 将QuantLinear包装之后的层替换原来的layer
+    # named_children用于递归访问所有子模块
+    # named_children() 只返回一层子模块,而 named_modules() 会递归返回所有上层模块
+    for name1, child in module.named_children():            #model.named_children():每一次迭代返回的每一个元素实际上是 一个元组类型，元组的第一个元素是名称，第二个元素就是对应的层或者是Sequential
         make_quant(
             child,
             names,
@@ -132,7 +134,7 @@ def pack_model(
         layer_device = qlayers[name].device
         qlayers[name].to(CPU)
         layers[name], scale, zero, g_idx = layers[name].to(CPU), scale.to(CPU), zero.to(CPU), g_idx.to(CPU)
-        qlayers[name].pack(layers[name], scale, zero, g_idx)
+        qlayers[name].pack(layers[name], scale, zero, g_idx)    # QuantLinear层中没有weight等信息，其实只是空的module里面包含了量化后的qweight以及量化必须的qscale, qzero等信息，因此可以极大压缩模型体积（实际上没有用int4 int3存储）
         qlayers[name].to(layer_device)
     logger.info('Model packed.')
 

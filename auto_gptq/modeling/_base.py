@@ -43,7 +43,7 @@ class BaseQuantizeConfig(PushToHubMixin):
     model_name_or_path: Optional[str] = field(default=None)
     model_file_base_name: Optional[str] = field(default=None)
 
-    def __post_init__(self):
+    def __post_init__(self):                # 会在自动生成的__init__()被调用中的最后自动被调用
         fields_info = fields(self)
 
         if self.bits not in fields_info[0].metadata["choices"]:
@@ -108,10 +108,10 @@ class BaseQuantizeConfig(PushToHubMixin):
 
 
 class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
-    layer_type: str = None
-    layers_block_name: str = None
-    outside_layer_modules: List[str] = None
-    inside_layer_modules: List[List[str]] = None
+    layer_type: str = None                                  # A list of layer class names that should never be split across device (for instance any layer that has aresidual connection).
+    layers_block_name: str = None                           # 优化的transformer里面block的名字
+    outside_layer_modules: List[str] = None                 # layer外的module
+    inside_layer_modules: List[List[str]] = None            # layer内要优化的module
     lm_head_name: str = "lm_head"
 
     fused_attn_module_type: Optional[FusedBaseAttentionModule] = None
@@ -222,13 +222,13 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                     remove_hook_from_module(module, recurse=True)
                     accelerate.cpu_offload_with_hook(module, CUDA_0)
 
-        layer_inputs = []
+        layer_inputs = []                   # 学习下transformer 和 bert的相关知识
         attention_masks = []
         position_ids = []
         layer_input_kwargs = []
         layer_outputs = []
 
-        examples = self._prepare_examples_for_quantization(examples, batch_size)
+        examples = self._prepare_examples_for_quantization(examples, batch_size)        # the examples should be list of dict whose keys can only be "input_ids" and "attention_mask"
 
         class LayerHijacker(nn.Module):
             """hijack layer's forward pass to cache data"""
@@ -239,13 +239,13 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                 self.data_device = device if cache_examples_on_gpu else CPU
 
             def forward(self, inp=None, **kwargs):
-                if inp is None:  # some models use all key-value arguments in forward pass call
+                if inp is None:  # some models use all key-value arguments in forward pass call     [1, 31, 768]
                     for kwarg_name in ["hidden_states"]:
                         if kwarg_name in kwargs:
                             inp = kwargs[kwarg_name]
                             break
                 layer_inputs.append(move_to_device(inp, self.data_device))
-                attention_masks.append(kwargs["attention_mask"].to(self.data_device))
+                attention_masks.append(kwargs["attention_mask"].to(self.data_device))       # size [1, 1, 31, 31] 这个attention是OPTDecoder中_prepare_decoder_attention_mask进行扩充的，这里cache住扩充后的attention_mask，从而后面直接feed进decoderlayer的输入即可
                 pos_ids = kwargs.get("position_ids", None)
                 if pos_ids is not None:
                     position_ids.append(move_to_device(pos_ids, self.data_device))
@@ -262,17 +262,17 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
         forward_pass_use_cache = self.model.config.use_cache
         self.model.config.use_cache = False
 
-        num_batches = len(examples)
-        layers = get_module_by_name_prefix(self.model, self.layers_block_name)
+        num_batches = len(examples)     # example的数量
+        layers = get_module_by_name_prefix(self.model, self.layers_block_name)      # opt-125m 'model.decoder.layers'，是一个moduleList，里面包含了12个OPTDecoderLayer
 
         force_layer_back_to_cpu = False
         if get_device(layers[0]) == CPU:
-            layers[0] = layers[0].to(CUDA_0)
+            layers[0] = layers[0].to(CUDA_0)                                        # 由于显存不够 操作的时候放到GPU，操作完重新放回CPU
             force_layer_back_to_cpu = True
 
         cur_layer_device = get_device(layers[0])
         ori_outside_layer_module_devices = {}
-        for module_name in self.outside_layer_modules:
+        for module_name in self.outside_layer_modules:                              # 将outside_layer_modules全部move to cuda 并把原device cpu暂存到上面的dict中
             module = get_module_by_name_prefix(self.model, module_name)
 
             if module is None:
@@ -283,24 +283,25 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                 move_to_device(module, cur_layer_device)
 
         # get inputs for first layer
-        layers[0] = LayerHijacker(layers[0], cur_layer_device)
+        layers[0] = LayerHijacker(layers[0], cur_layer_device)      # 先把第一层拿出来将输入送进去
         for example in examples:
             for k, v in example.items():
                 if len(v.shape) == 1:
                     v = v.unsqueeze(0)
-                example[k] = move_to_device(v, cur_layer_device)
+                example[k] = move_to_device(v, cur_layer_device)            # 把输入即example move到cuda上
             try:
                 self.model(**example)
             except ValueError:
                 pass
-        layers[0] = layers[0].module
+        layers[0] = layers[0].module                                    # 第一层的输入相关参数已经暂存到layer_inputs以及attention_mask中
 
-        move_to_device(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)
+        move_to_device(layers[0], CPU if force_layer_back_to_cpu else cur_layer_device)     # 重新移回cpu上
         for module_name in self.outside_layer_modules:
             module = get_module_by_name_prefix(self.model, module_name)
             if module is not None:
                 move_to_device(module, ori_outside_layer_module_devices[module_name])
 
+        # 释放缓存分配器当前持有的且未占用的缓存显存，以便这些显存可以被其他GPU应用程序中使用
         torch.cuda.empty_cache()
 
         # resize attention mask and position ids for some special models
@@ -318,9 +319,9 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
             if get_device(layer) == CPU:
                 move_to_device(layer, CUDA_0)
                 force_layer_back_to_cpu = True
-            cur_layer_device = get_device(layer)
+            cur_layer_device = get_device(layer)            # 将当前layer放到cuda上
 
-            full = find_layers(layer)
+            full = find_layers(layer)                       # {'self_attn.k_proj':Linear, ...,'fc1':Linear, 'fc2':Linear}
             for names in inside_layer_modules:
                 subset = {n: full[n] for n in names}
                 gptq = {}
@@ -334,15 +335,15 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                     )
 
                 def add_batch(name):
-                    def tmp(_, inp, out):
-                        gptq[name].add_batch(inp[0].data, out.data)
+                    def tmp(_, inp, out):                                           # The hook will be called every time after :func:`forward` has computed an output.                                            
+                        gptq[name].add_batch(inp[0].data, out.data)                 # It should have the following signature::hook(module, input, output) -> None or modified output
 
                     return tmp
 
                 handles = []
                 for name in subset:
                     handles.append(subset[name].register_forward_hook(add_batch(name)))
-                for j in range(num_batches):
+                for j in range(num_batches):            # 逐层量化，k_proj,v_proj,q_proj 是平级的weight不会互相影响 因此先量化这几个
                     layer_input = move_to_device(layer_inputs[j], cur_layer_device)
                     layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
                     additional_layer_inputs = {
@@ -362,21 +363,21 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
 
                 for name in subset:
                     logger.info(f'Quantizing {name} in layer {i + 1}/{len(layers)}...')
-                    scale, zero, g_idx = gptq[name].fasterquant(
+                    scale, zero, g_idx = gptq[name].fasterquant(        # 将平均过后的self.H hessian矩阵 计算gptq的量化后参数
                         percdamp=self.quantize_config.damp_percent,
                         group_size=self.quantize_config.group_size,
                         actorder=self.quantize_config.desc_act,
                         static_groups=self.quantize_config.static_groups
                     )
                     quantizers[f'{self.layers_block_name}.{i}.{name}'] = (
-                        gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),
+                        gptq[name].quantizer.to(CPU if force_layer_back_to_cpu else cur_layer_device),  # quantizer的参数和缓冲区所在的设备全部转移到CPU上
                         move_to_device(scale, CPU if force_layer_back_to_cpu else cur_layer_device),
                         move_to_device(zero, CPU if force_layer_back_to_cpu else cur_layer_device),
                         move_to_device(g_idx, CPU if force_layer_back_to_cpu else cur_layer_device)
                     )
                     gptq[name].free()
 
-            for j in range(num_batches):
+            for j in range(num_batches):        # 将所有batch的数据移到GPU上全部放到网络里获取output
                 layer_input = move_to_device(layer_inputs[j], cur_layer_device)
                 layer_attention_mask = move_to_device(attention_masks[j], cur_layer_device)
                 additional_layer_inputs = {
@@ -391,16 +392,16 @@ class BaseGPTQForCausalLM(nn.Module, PushToHubMixin):
                     else:
                         additional_layer_inputs[k] = v
                 layer_output = move_to_device(
-                    layer(layer_input, **additional_layer_inputs)[0],
-                    cur_layer_device if cache_examples_on_gpu else CPU
+                    layer(layer_input, **additional_layer_inputs)[0],       # https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py#L276
+                    cur_layer_device if cache_examples_on_gpu else CPU      # 送入OptDecoderLayer中进行forward计算，返回值中的第一项[0]就是hidden_states 即输出的tensor
                 )
-                layer_outputs.append(layer_output)
+                layer_outputs.append(layer_output)      # 获得output
 
-            layers[i] = move_to_device(layer, CPU if force_layer_back_to_cpu else cur_layer_device)
+            layers[i] = move_to_device(layer, CPU if force_layer_back_to_cpu else cur_layer_device)     # 当前layer处理完之后移回CPU然后清理cache
             del layer
             del gptq
             del layer_inputs
-            layer_inputs, layer_outputs = layer_outputs, []
+            layer_inputs, layer_outputs = layer_outputs, []     # 当前层的输出作为后面层的输入
             torch.cuda.empty_cache()
 
         pack_model(
